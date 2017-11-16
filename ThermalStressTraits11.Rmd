@@ -1,0 +1,835 @@
+
+---
+title: "Thermal Stress"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+Exploration of traits that reduce thermal stress in Austrlia.
+4 data files needed to run code:
+  Traits
+  Choa raster
+  Occurange matrix
+  Average annual VPD
+
+```{r,warning=FALSE,message=FALSE}
+
+
+rm(list = ls())
+
+library(raster)
+library(RColorBrewer)
+library(data.table)
+library(maptools)
+#library(letsR)
+#library(plantecophys)
+library(car)
+#library(mgcv)
+library(ncf)
+library(spdep)
+#library(resample)
+library(lme4)
+library(plyr)
+library(multcomp)
+library(Hmisc)
+library(MuMIn)
+
+#Albers equal area projection
+Albers<-"+proj=aea +lat_1=-18 +lat_2=-36 +lat_0=0 +lon_0=134 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+
+
+resetPar <- function() {
+    dev.new()
+    op <- par(no.readonly = TRUE)
+    dev.off()
+    op
+}
+
+asNumeric <- function(x) as.numeric(as.character(x))
+factorsNumeric <- function(d) modifyList(d, lapply(d[, sapply(d, is.factor)], asNumeric))
+
+
+SACPrepMoranDistance<-function (lmModels, distkm, neighborStyle,coords){
+  disNB<-dnearneigh(coords, 0, distkm,longlat=TRUE) #turns neighbourhood object into a weighted list
+  listWeight<-nb2listw(disNB, glist=NULL, style=neighborStyle, zero.policy=FALSE)
+  #moran.test(residuals(lmModels), listw=listWeight)
+  SARlm <- errorsarlm(lmModels, listw=listWeight)
+  #summary(SARlm, Nagelkerke=TRUE) #Gives a summary of the SAR error model
+
+  coeffcnt<-as.numeric(SARlm$coefficients[2])
+  SE<- as.numeric(SARlm$rest.se[2])
+  lmAIC<-SARlm$AIC_lm.model # this is AIC of lm
+  sarAIC<-AIC(SARlm)
+  NagelkerkePseudoRsquared<-summary(SARlm, Nagelkerke=TRUE)[[47]]
+  #get values  of Moran’s I over the first twenty distance groupings
+  correlo <- correlog(coords[,1], coords[,2], residuals(SARlm),
+na.rm=T, increment=1, resamp=0)
+  MoransI20distGroup <-sum(correlo$correlation[1:20])
+  outdat<-t(c(distkm,neighborStyle,lmAIC,sarAIC,MoransI20distGroup,coeffcnt,SE,NagelkerkePseudoRsquared))
+  colnames(outdat)<-c("SACdistance","neighborStyle","lmAIC","sarAIC","MoransI20distGroup","regression coefficients","SE","NagelkerkePseudo-R-squared")
+ return(outdat)
+}
+
+#colours for graphs
+rgb.palette <-
+        colorRampPalette(c("darkgreen",
+                  "orange",
+                  "darkblue"),
+                  space = "rgb")
+
+#########################
+#load needed data
+#########################
+#traits
+traits<-read.csv('/Users/daisy/Google Drive/PhD/ThermalStress/tables/Table_S1_20161128.csv')
+          #occurence records
+          # Occ<-read.csv("~/Google Drive/PhD/ThermalStress/data/PassarineObservationsGriddedFinal2016-06-21.csv")
+          # Occ<-unique(Occ)
+#read in observations
+Occ <- fread("~/Google Drive/PhD/ThermalStress/data/PassarineObservationsFinal2016-06-21.csv",
+                        data.table=FALSE)
+#change XY to albers equal area
+Locs_sp <- SpatialPoints(cbind(Occ$lon, Occ$lat), proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84"))
+Locs_sp <- spTransform(Locs_sp, CRS=CRS(paste(Albers)))
+Alberslocs<-as.data.frame(Locs_sp)
+colnames(Alberslocs) <- c("Lon_Albers","Lat_Albers")
+Occ<-cbind(Occ,Alberslocs)
+
+# species <- unique(occ$Scientific.Name)
+
+
+
+
+#completeness index
+#ChaoR<-raster("/Users/daisy/Google Drive/PhD/ThermalStress/data/CmpltDomeCupGridCells100km2017-02-14.asc",crs=Albers)
+ChaoR<-raster("/Users/daisy/Google Drive/PhD/ThermalStress/data/ChoaIndex100km10SpeciesMinimum2017-02-15.asc",crs=Albers)
+#ChaoR<-trim(ChaoR)
+Chao<-rasterToPoints(ChaoR)
+# 100km mask of Austrlaia where each gridcell has unique ID
+aus<-ChaoR
+aus[]<-1:1480 #Give each grid cell unique value
+aus<-raster::mask(aus,ChaoR)#keep only cells interested in
+#remove Occ that do not occur in gridcells we want to asses, CI < 0.7
+Occ<-unique(Occ[,c('Scientific.Name','Lon_Albers',"Lat_Albers")])
+Occ$ID<-raster::extract(aus,cbind(Occ$Lon_Albers,Occ$Lat_Albers))#Grid cell ID for each presence record
+Occ<-subset(Occ,ID!= "NA")
+GridOcc<-unique(Occ[c("Scientific.Name","ID")])
+#summary of gidcell occupancey
+occTable<-as.data.frame(table(GridOcc$ID))
+min(occTable$Freq)#min number of species per gridcell
+max(occTable$Freq)#max number of species per gridcell
+mean(occTable$Freq)#mean number of species per gridcell
+median(occTable$Freq)#mean number of species per gridcell
+spTable<-as.data.frame(table(GridOcc$Scientific.Name))
+min(spTable$Freq)#min number of grid cells occupied by a species
+max(spTable$Freq)#max number of gridcells occupied by a species
+mean(spTable$Freq)
+median(spTable$Freq)
+
+##################################
+
+#Figure of Species Richness
+
+#################################
+
+RichAllSPecies<-raster::subs(aus,occTable)
+rgb.palette <-
+  colorRampPalette(c("darkgreen",
+                     "orange",
+                     "darkblue"),
+                   space = "rgb")
+
+ausOutline <- readShapeSpatial("/Users/daisy/Google Drive/PhD/Data/Spatial/OutlineOfAustralia/Australia_original_nostates.shp", proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84"))
+ausOutline <-spTransform(ausOutline, CRS=CRS(paste(Albers)))
+
+
+pdf(file = paste0("/Users/daisy/Google Drive/PhD/ThermalStress/figures/manuscript/SpeciesRichenss",as.Date(Sys.time()),".pdf"),
+    width = 3, height = 3)
+par(mar=c(0,0,0,0))
+plot(ausOutline)
+plot(RichAllSPecies,col=rgb.palette(9),legend=FALSE, axes=FALSE,box=FALSE,add=TRUE)
+plot(ausOutline, bg="transparent", add=TRUE,border="black")
+plot(RichAllSPecies,
+     legend.only=T,
+     col=rgb.palette(9),
+     smallplot=c(0.08,0.12, 0.1,0.23),
+     axis.args=list(cex.axis=.8,
+                    at=c(40,80,120,160),
+                    labels=c(40,80,120,160)))
+ dev.off()
+
+
+```
+Load in VPD and LAI and make figure
+
+```{r, echo=FALSE}
+#mask of Australia based on BOM data
+ausGrid<-raster::raster("/Users/daisy/Google Drive/PhD/ThermalStress/data/spatial/aus100kmMask.asc",
+                    crs = Albers)#mask of Australia
+#VPD
+VPDann<-raster("/Users/daisy/Google Drive/PhD/ThermalStress/data/spatial/VPD100km2017-02-13.asc")
+VPDann<-raster::trim(raster::mask(VPDann,ausGrid))
+#LAI
+LAIann<-raster("/Users/daisy/Google Drive/PhD/ThermalStress/data/spatial/LAI100km2017-02-13.asc")
+LAIann<-raster::trim(raster::mask(LAIann,ausGrid))
+
+##############################
+
+#Figure - VPD and LAI
+
+#############################
+
+pdf(file = paste0("/Users/daisy/Google Drive/PhD/ThermalStress/figures/manuscript/VPDandLAI",as.Date(Sys.time()),".pdf"),
+    width = 7.48, height = 3)
+
+rgb.palette <-
+  colorRampPalette(c("darkgreen",
+                     "orange",
+                     "darkblue"),
+                   space = "rgb")
+
+par(mfrow=c(1,2),
+    mar=c(0,1,0,0))
+plot(ausOutline)
+plot(VPDann,col=rgb.palette(9),legend=FALSE, axes=FALSE,box=FALSE,ext=extent(trim(aus)),add=TRUE)
+plot(ausOutline, bg="transparent", add=TRUE,border="black")
+plot(VPDann,
+     legend.only=T,
+     col=rgb.palette(9),
+     smallplot=c(0.08,0.12, 0.04,0.23),
+     axis.args=list(cex.axis=.8,
+                    at=c(1:4),
+                    labels=c(1:4)),
+    legend.args=list(text='VPD (kPa)', side=3, font=2, line=1, cex=0.8))
+legend("topleft" , "(a)", bty="n",text.font=c(font=2),cex=1) 
+
+#LAI
+
+plot(ausOutline)
+plot(LAIann,col=rgb.palette(9),legend=FALSE, axes=FALSE,box=FALSE,ext=extent(trim(aus)),add=TRUE)
+plot(ausOutline, bg="transparent", add=TRUE,border="black")
+plot(LAIann,
+     legend.only=T,
+     col=rgb.palette(9),
+     smallplot=c(0.08,0.12, 0.04,0.23),
+     axis.args=list(cex.axis=.8,
+                    at=seq(0.5,2.5,1),
+                    labels=seq(0.5,2.5,1)),
+    legend.args=list(text='LAI', side=3, font=2, line=1, cex=0.8))
+legend("topleft" , "(b)", bty="n",text.font=c(font=2),cex=1) 
+
+
+dev.off()
+
+
+
+
+```
+
+Summary Stats and explore data
+
+```{r, echo=FALSE}
+
+
+#####################
+#get summary values for elongation
+####################
+
+length(na.omit(traits$Elongation))
+min(na.omit(traits$Elongation))
+max(na.omit(traits$Elongation))
+mean(na.omit(traits$Elongation))
+sd(na.omit(traits$Elongation))
+hist(na.omit(traits$Elongation))
+sd(na.omit(traits$Elongation))/sqrt(length(na.omit(traits$Elongation))) #standard error
+## Check if normally distributed
+qqPlot(na.omit(traits$Elongation))
+
+```
+
+Check if within grid cells it is normally distributed
+
+```{r, echo=FALSE}
+
+locs<-unique(Occ$ID)
+message(paste0("Number of 100km grid cells being used = ",length(locs)))
+message(paste0("Number of Passarine species in study = ",length(unique(Occ$Scientific.Name))))
+
+IDs<-sample(locs, 40)
+#loop through cells and get average trait values
+for(j in 1:length(IDs)){ 
+  sp<-subset(GridOcc,ID==IDs[j])$Scientific.Name
+  #get species level data
+  tr<-traits[traits$Species %in% sp,]#pull out the traits for the species of interest
+  tr<-na.omit(tr[,"Elongation"])
+  qqPlot(tr, main =subset(Occ,ID==IDs[j])[1,c("Lon_Albers","Lat_Albers")] )#data is normal if it falls within the confident interval
+}
+# the data is normally distributed, but the species that have the roundedest shape sometimes fall outside of the qqPlots confidence intervals
+
+```
+
+Analysis 1 - similarity of egg elongation for species with different nest-types
+
+```{r, echo=FALSE}
+
+
+#elongation by nest type
+nest.type<-ddply(traits,~Nest.type,summarise,mean=mean(na.omit(Elongation)),
+                 sd=sd(na.omit(Elongation)),n=length(na.omit(Elongation)))
+plot(Elongation ~ Nest.type, data=traits)
+#Cavity significantly differnt?
+mod1<-lm(Elongation ~ Nest.type,data=traits)
+qqPlot(residuals(mod1),main=("mod1"))
+summary(mod1)
+Anova(mod1, test.statistic="F")
+#pair wise comparisons
+TukeyNest<- glht(mod1, linfct=mcp(Nest.type="Tukey"))
+summary(TukeyNest)
+
+#mixed effect model returns same results
+
+mod1mx<-lmer(Elongation ~ Nest.type + (1|Family) ,data=traits)
+qqPlot(residuals(mod1mx),main=("mixed effect"))
+summary(mod1mx)
+Anova(mod1mx, test.statistic="F")
+#pair wise comparisons
+TukeyNest<- glht(mod1mx, linfct=mcp(Nest.type="Tukey"))
+summary(TukeyNest)
+r.squaredGLMM(mod1mx)
+
+
+```
+
+Make new dataframe wtih the average values for each gridcell 
+-elongation cupped nests
+-elongation domed nests
+-proportion domed nests
+```{r, echo=FALSE}
+
+#loop through cells and get average trait values
+celltraitPass<-list()
+for(lc in 1:length(locs)){ 
+  sp<-subset(GridOcc,ID==locs[lc])$Scientific.Name
+  if(length(sp)<=10){
+    stop("Not enough species")
+  }
+  tr<-traits[traits$Species %in% sp,]#pull out the traits for the species of interest
+  eggElong<-mean(na.omit(tr$Elongation))
+  eggElongDome<-mean(na.omit(subset(tr,Nest.type=="Dome",select=Elongation)[,1]))#mean elongation for domed
+  eggElongCup<-mean(na.omit(subset(tr,Nest.type=="Cup",select=Elongation)[,1]))#mean elongation for cupped
+  CupRichness<-nrow(subset(tr,Nest.type=="Cup"))
+  DomeRichness<-nrow(subset(tr,Nest.type=="Dome"))
+  Richness<-CupRichness+DomeRichness
+  propDome<-DomeRichness/(DomeRichness+CupRichness)
+    celltraitPass[[lc]]<-c(locs[lc],
+                      eggElong,
+                      eggElongDome,
+                      eggElongCup,
+                      CupRichness,
+                      DomeRichness,
+                      Richness,
+                      propDome)
+}
+celltraitPass<-as.data.frame(do.call("rbind",celltraitPass))
+colnames(celltraitPass)<-c("ID",
+                      "eggElong",
+                      "eggElongDome",
+                      "eggElongCup",
+                      "CupRichness",
+                      "DomeRichness",
+                      "Richness",
+                      "propDome")
+
+
+```
+Exploratory figure of  Richness for diffenent nest types 
+
+```{r, echo=FALSE}
+
+RichAllSpecies<-subs(aus,
+             data.frame(celltraitPass[,c("ID","Richness")]))
+RichDomed<-subs(aus,
+             data.frame(celltraitPass[,c("ID","DomeRichness")]))
+RichCup<-subs(aus,
+             data.frame(celltraitPass[,c("ID","CupRichness")]))
+domedNests<-subs(aus,
+             data.frame(celltraitPass[,c("ID","propDome")]))
+
+elongCup<-subs(aus,
+              data.frame(celltraitPass[,c("ID","eggElongCup")]))
+cellStats(elongCup,'mean')
+ 
+elongDomed<-subs(aus,
+              data.frame(celltraitPass[,c("ID","eggElongDome")]))
+
+par(mfrow=c(1,3))
+breakpoints <- seq(10,150,10)
+
+colors <- (rgb.palette(14))
+plot(RichAllSpecies,breaks=breakpoints,col=colors, main = "All Species")
+plot(RichDomed,breaks=breakpoints,col=colors, main = "Domed")
+plot(RichCup,breaks=breakpoints,col=colors, main = "Cup")
+
+```
+compare extreme gridcells
+
+```{r, echo=FALSE}
+#find extreme VPD
+ExVPD<-VPDann
+#arid
+ExVPD[ExVPD <= 4.4] <- NA
+exLAI<- (ExVPD/ExVPD)*LAIann
+plot(exLAI)
+exLAI<-raster::mask(exLAI,aus)
+exID<-(exLAI/exLAI)*aus 
+aridID<-rasterToPoints(exID)[,"layer"]
+#wet
+minVPD<-VPDann
+minVPD[minVPD >= 1.6] <- NA
+plot(minVPD)
+MinLAI<- (minVPD/minVPD)*LAIann
+plot(MinLAI)
+MinLAI[MinLAI <= 2] <- NA
+plot(MinLAI)
+minID<-(MinLAI/MinLAI)*aus 
+minID[minID > 600] <- NA
+MinLAI<-MinLAI*(minID/minID)
+minVPD<-minVPD*(minID/minID)
+plot(minVPD)
+wetID<-(minVPD/minVPD)*aus 
+wetID<-rasterToPoints(wetID)[,"layer"]
+
+#get species data
+dry<-unique(GridOcc[GridOcc$ID %in% aridID,]$Scientific.Name)
+wet<-unique(GridOcc[GridOcc$ID %in% wetID,]$Scientific.Name)
+trDry<-traits[traits$Species %in% dry,]
+trDry$aridity<-"dry"
+trWet<-traits[traits$Species %in% wet,]
+trWet$aridity<-"wet"
+dryWetDat<-rbind(trDry,trWet)
+
+dryWetDat$aridity<-as.factor(dryWetDat$aridity)
+dryWetDat<-subset(dryWetDat,Nest.type != "Cavity")
+#compare using mixed effect model
+summary(aridLM<-lmer(Elongation ~ aridity + Nest.type + (1|Family),data=dryWetDat))
+Anova(aridLM, test.statistic="F")
+#find differencs between regions
+TukeyRegion1<- glht(aridLM, linfct=mcp(aridity="Tukey"))
+TukeyRegion2<- glht(aridLM, linfct=mcp(Nest.type="Tukey"))
+summary(TukeyRegion1)
+summary(TukeyRegion2)
+
+summary(aridLM<-lm(Elongation ~ aridity,data=dryWetDat))
+Anova(aridLM, test.statistic="F")
+
+
+
+```
+
+Prep data for SAR models 
+
+
+```{r}
+
+
+propDOMEp<-rasterToPoints(domedNests)
+elongCUPp<-rasterToPoints(elongCup)
+elongDOMEp<-rasterToPoints(elongDomed)
+VPDp<-rasterToPoints(VPDann)
+LAIp<-rasterToPoints(LAIann)
+colnames(VPDp)<-c("x","y","VPD")
+colnames(LAIp)<-c("x","y","LAI")
+dat<-merge.data.frame(propDOMEp,elongCUPp,by=c("x","y"))
+dat<-merge.data.frame(dat,elongDOMEp,by=c("x","y"))
+dat<-merge.data.frame(dat,VPDp,by=c("x","y"))
+dat<-merge.data.frame(dat,LAIp,by=c("x","y"))
+
+```
+
+Analysis 2 and 3 - 
+(2) variation in egg elongation in relation to VPD and LAI 
+(3) variation in the proportion of species with enclosed nests in relation to VPD and LAI. 
+
+
+```{r}
+
+# linear models
+summary(lmElCup <- lm(eggElongCup ~ VPD * LAI, data=dat))
+summary(lmElDome <- lm(eggElongDome ~ VPD * LAI, data=dat))
+summary(lmPropDome <- lm(propDome ~ VPD * LAI, data=dat))
+
+
+
+# test of spatial autocorrelation
+GridCoords<-as.matrix(cbind(dat$x,dat$y))
+nlist<-dnearneigh(GridCoords,d1=0,d2=200000) #distances are in meters, 
+listWeight<-nb2listw(nlist, style="W")
+moran.test(residuals(lmElCup), listw=listWeight)
+moran.test(residuals(lmElDome), listw=listWeight)
+moran.test(residuals(lmPropDome), listw=listWeight)
+
+#The resulting p values from moran.test support the conclusion that the errors in models are spatially autocorrelated, run a spatial error model - simultaneous autoregressive model (SAR). Run SAR model with weighted lists
+
+#error -  200 km, W
+elongNB<-dnearneigh(GridCoords, 0, 200000,longlat=FALSE) #turns neighbourhood object into a weighted list
+elonglistWeight<-nb2listw(elongNB, glist=NULL, style="W", zero.policy=FALSE)
+#SAR models
+summary(SARlmElCup <- errorsarlm(lmElCup, listw=elonglistWeight),
+        Nagelkerke=T) #sig
+summary(SARlmElDome <- errorsarlm(lmElDome, listw=elonglistWeight),
+        Nagelkerke=T)#sig
+summary(SARlmPropDome <- errorsarlm(lmPropDome, listw=elonglistWeight),
+        Nagelkerke=T)#sig
+
+
+
+
+
+######################
+
+#Figure Elongation and propotion domed
+
+######################
+
+# #get range of VPD values under differnt low, averag, and high LAI
+QLAI<-quantile(dat$LAI, c(.05,.95))
+rangeVPDMinLAI<-c(min(subset(dat,LAI<=QLAI[1],select=VPD)),max(dat$VPD))
+
+midrangedata<-subset(dat,LAI>QLAI[1] & LAI<QLAI[2],select=VPD)
+rangeVPDMeanLAI<-c(min(midrangedata),max(midrangedata))
+
+rangeVPDMaxLAI<-c(min(dat$VPD),max(subset(dat,LAI>=QLAI[2],select=VPD)))
+
+
+#predict response to VPD under differnt LAI
+predLAILow <- data.frame(LAI = QLAI[1],
+                        VPD = seq(min(subset(dat,LAI<=QLAI[1],select=VPD)),
+                                  max(dat$VPD),length=101))
+predLAImean <- data.frame(LAI = mean(dat$LAI),
+                        VPD = seq(rangeVPDMeanLAI[1],rangeVPDMeanLAI[2], length=101))
+predLAIHigh <- data.frame(LAI = QLAI[2],
+                        VPD = seq(rangeVPDMaxLAI[1],rangeVPDMaxLAI[2], length=101))
+
+predLAILow$Domepred <- predict(SARlmElDome, newdata=predLAILow)
+predLAILow$CuppredM <- predict(SARlmElCup, newdata=predLAILow)
+predLAILow$PropDome <- predict(SARlmPropDome, newdata=predLAILow)
+
+predLAImean$Domepred <- predict(SARlmElDome, newdata=predLAImean)
+predLAImean$CuppredM <- predict(SARlmElCup, newdata=predLAImean)
+predLAImean$PropDome <- predict(SARlmPropDome, newdata=predLAImean)
+
+predLAIHigh$Domepred <- predict(SARlmElDome, newdata=predLAIHigh)
+predLAIHigh$CuppredM <- predict(SARlmElCup, newdata=predLAIHigh)
+predLAIHigh$PropDome <- predict(SARlmPropDome, newdata=predLAIHigh)
+
+#function to make abline with range (from: Remko Duursma)
+abline_range <- function(a=NULL,b=NULL,reg=NULL,from=NULL,to=NULL,...){
+  # Borrowed from abline
+  if (!is.null(reg)) a <- reg
+  if (!is.null(a) && is.list(a)) {
+    temp <- as.vector(coefficients(a))
+    from <- min(a$model[,2], na.rm=TRUE)
+    to <- max(a$model[,2], na.rm=TRUE)
+    if (length(temp) == 1) {
+      a <- 0
+      b <- temp
+    }
+    else {
+      a <- temp[1]
+      b <- temp[2]
+    }
+  }
+  segments(x0=from,x1=to,
+           y0=a+from*b,y1=a+to*b,...)
+}
+
+{
+pdf(file = paste0("/Users/daisy/Google Drive/PhD/ThermalStress/figures/manuscript/ElongationProportionMapsPlots",as.Date(Sys.time()),".pdf"),
+    width = 7.48, height = 10)
+
+par(mfrow = c(3,2),          
+    mar = c(2,0,2,1) + 0.1)
+
+rgb.palette <-
+  colorRampPalette(c("darkgreen",
+                     "orange",
+                     "darkblue"),
+                   space = "rgb")
+breakpoints <- seq(1.33,1.42,.01)
+
+
+#(a) - Elongation for domed nests
+plot(elongDomed,col=rgb.palette(9),breaks=breakpoints,axes=F,legend=F,box=F)
+legend("topleft", "(a)", bty="n",text.font=c(font=2),cex=1.5)
+plot(ausOutline, bg="transparent", add=TRUE,border="black")
+plot(elongDomed,
+     legend.only=T,
+     col=rgb.palette(9),
+     breaks=breakpoints,
+     smallplot=c(0.08,0.12, 0.04,0.23),
+     axis.args=list(cex.axis=1.2,
+                    at=c(1.348,1.38,1.412),
+                    labels=seq(1.34,1.42, 0.04)))
+
+par(mar =  c(4, 4, 1, 1)) 
+with(dat, plot(VPD, eggElongDome,
+               pch=20,
+               col="grey",
+               cex=1.2,
+               xlab="VPD (kPa)", 
+               ylab = "Elongation - domed nests",
+               frame=F,
+               axis.args=list(cex.axis=1.2)))
+box(which = "plot", bty = "l")
+with( predLAIHigh, lines(VPD, Domepred, lwd=2, col="darkgreen"))
+with(predLAILow, lines(VPD, Domepred, lwd=2, col="darkblue"))
+with(predLAImean, lines(VPD, Domepred, lwd=2, col="orange"))
+
+ELDomR2<-round(summary(SARlmElDome,Nagelkerke=T)$ NK,2) 
+myr2 = bquote(italic(R)^2 == .(ELDomR2))
+legend("bottomleft", legend  = myr2, bty="n",cex=1.2) 
+
+#(b) - Elongation for cup nests
+par(mar = c(2,0,2,1) + 0.1)
+plot(elongCup,col=rgb.palette(9),breaks=breakpoints,axes=F,legend=F,box=F)
+plot(ausOutline, bg="transparent", add=TRUE,border="black")
+legend("topleft" , "(b)", bty="n",text.font=c(font=2),cex=1.5)
+plot(elongCup,
+    legend.only=T,
+    breaks=breakpoints,
+     col=rgb.palette(9),
+     smallplot=c(0.08,0.12, 0.04,0.23),
+     axis.args=list(cex.axis=1.2,
+                    at=c(1.348,1.38,1.412),
+                    labels=seq(1.34,1.42, 0.04)))
+
+
+par(mar =  c(4, 4, 1, 1)) 
+with(dat, plot(VPD, eggElongCup,
+               pch=20,
+               col="grey",
+               cex=1,
+               xlab="VPD (kPa)", 
+               ylab = "Elongation - cupped nests",
+               frame=F))
+box(which = "plot", bty = "l")
+with( predLAIHigh, lines(VPD, CuppredM, lwd=2, col="darkgreen"))
+with( predLAImean, lines(VPD, CuppredM, lwd=2, col="orange"))
+with(predLAILow, lines(VPD, CuppredM, lwd=2, col="darkblue"))
+
+ELCupR2<-round(summary(SARlmElCup,Nagelkerke=T)$ NK,2) 
+cupr2 = bquote(italic(R)^2 == .(ELCupR2))
+legend("bottomleft", legend  = cupr2, bty="n") 
+
+##Proportion covered
+
+par(mar = c(2,0,2,1) + 0.1)
+plot(domedNests,col=rgb.palette(9),axes=F,legend=F,box=F)
+plot(ausOutline, bg="transparent", add=TRUE,border="black")
+legend("topleft" , "(c)", bty="n",text.font=c(font=2),cex=1.5) 
+plot(domedNests,
+     legend.only=T,
+     col=rgb.palette(9),
+     smallplot=c(0.08,0.12, 0.04,0.23),
+     axis.args=list(cex.axis=1,
+                    at=c(.2,.3, .4),
+                    labels=c(.2,.3, .4)))
+
+par(mar =  c(4, 4, 1, 1)) 
+with(dat,plot(propDome ~ VPD,
+              pch=20,
+              col="grey",
+              cex=1,
+              xlab="VPD (kPa)", 
+              ylab = "Domed nest (proportion)",
+              frame=F))
+box(which = "plot", bty = "l")
+with(predLAIHigh, lines(VPD, PropDome, lwd=2, col="darkgreen"))
+with(predLAILow, lines(VPD, PropDome, lwd=2, col="darkblue"))
+with( predLAImean, lines(VPD, PropDome, lwd=2, col="orange"))
+
+
+ELDomR2<-round(summary(SARlmElDome,Nagelkerke=T)$ NK,2) 
+PDomer2 = bquote(italic(R)^2 == .(ELDomR2) )
+legend("bottomleft", legend  = PDomer2, bty="n") 
+
+dev.off()  
+
+}
+
+
+
+
+
+```
+
+```{r,echo=FALSE}
+
+
+########################################
+
+#CI scores
+#function to make map CI Score using bootstrap methodo
+
+# #######################################
+# # 
+# #make dataframe of unique grid cells and species richness
+#  zdat<-as.data.frame(table(Occ$ID))
+# 
+# #species richenss map
+# richness<-subs(aus, data.frame(zdat[,c("Var1","Freq")]))
+# plot(richness,main = "Species richness")
+# 
+#  
+# CIBOOT<-function (GridCell,GriddedOccurance,traitData,traitOfInterst){ 
+#     sp<-as.character(subset(GriddedOccurance,ID==GridCell)[,"Species"])
+#     tr<-traitData[traitData$Species %in% sp,]#pull out the traits for the species of interest
+#     obs_data<-na.omit(tr[,paste(traitOfInterst)])
+#     bootdat<-bootstrap(obs_data, mean(obs_data), R = 10000)
+#     obs_se <- bootdat$stats$SE
+#     CI<-obs_se*2 #95% CI
+#     spCount<-length(sp)
+#     spWithknownValue<-length(obs_data)
+#     dfOUT<-cbind(GridCell,CI,spCount,spWithknownValue)
+#     return(dfOUT)
+# }
+# 
+# 
+# #loop through cells and get average trait values
+# CIscores<-list()
+# propCIscores<-list()
+# for(ID in 1:length(unique(Occ$ID))){ 
+# CIscores[[ID]]<- CIBOOT(GridCell=unique(Occ$ID)[ID],
+#                  GriddedOccurance=Occ,
+#                  traitData=traits,
+#                  traitOfInterst="Elongation")
+#   
+# 
+# propCIscores[[ID]]<- CIBOOT(GridCell=unique(Occ$ID)[ID],
+#                  GriddedOccurance=Occ,
+#                  traitData=traits,
+#                  traitOfInterst="roof")
+# 
+# message(ID)
+# }
+# 
+# elongCIscores<-as.data.frame(do.call("rbind",CIscores))
+# elongCIsore<-subs(aus, data.frame(elongCIscores[,c("GridCell","CI")]))
+# plot(elongCIsore,main = "CI")
+# 
+#   
+# PropCIscores<-as.data.frame(do.call("rbind",propCIscores))
+# PropCIsoreR<-subs(aus, data.frame(na.omit(PropCIscores[,c("GridCell","CI")])))
+# plot(PropCIsoreR,main = "CI")
+# 
+# 
+
+
+################
+
+
+
+```
+
+# test to see if elongation changes within a species due to differences in VPD
+#
+# **Removed all values from QVM - the were incorrectly entered into the .csv file
+#
+# mixed effect model with VPD as fixed effect and nest ID as random effects
+#
+# "Linear mixed-effects models were used to assess how within species egg elongation changed in response to VPD. ANOVA was calculated using an Analysis of Deviance Table (Type II Wald F tests with Kenward-Roger approximation for degrees-of-freedom). In our models for each species  VPD was a fixed effect and nest ID was a random effect to account for differences in egg shape within a single nest."
+#
+
+```{r,echo=FALSE}
+
+
+#species of interest
+species<-c("Cracticus tibicen","Petrochelidon ariel","Zosterops lateralis",
+           "Anthus australis","Rhipidura leucophrys","Grallina cyanoleuca",
+           "Petrochelidon nigricans","Taeniopygia bichenovii","Pachycephala rufiventris",
+           "Rhipidura albiscapa","Pomatostomus temporalis","Melanodryas cucullata",
+           "Manorina melanocephala","Anthus novaeseelandiae")
+
+#rename
+spDat<-read.csv("/Users/daisy/Google Drive/PhD/ThermalStress/data/151124_otherSpecies_egg_collection_details_rearranged.csv")
+  
+nms<-c(names(spDat)[1:12],paste(rep(c("egg_area","egg_length","egg_width"),11),rep(1:11,each=3),sep="."),names(spDat)[46])
+colnames(spDat)<-nms
+
+#change to wide format
+longDat<-list()
+for (l in 1:11){
+  df1<-spDat[,c(names(spDat)[1:12],paste(c("egg_area","egg_length","egg_width"),rep(l,3),sep="."),names(spDat)[46])]
+  colnames(df1)<-c(names(spDat)[1:12],"egg_area","egg_length","egg_width",names(spDat)[46])
+  longDat[[l]]<-df1
+}
+longDat<-as.data.frame(do.call(rbind,longDat))
+longDat<-subset(longDat,!is.na(longDat$egg_area))#remove NA values
+longDat<-subset(longDat,!is.na(longDat$egg_length))#remove NA values
+
+#Extract VPD at the locations
+longDat$VPD<-extract(VPDann,cbind(longDat$decimalLongitude,longDat$decimalLatitude))
+longDat$LAI<-extract(LAI,cbind(longDat$decimalLongitude,longDat$decimalLatitude))
+
+#for cells falling just off the coast use bilinear interpolation to get VPD values
+longDatNA<-subset(longDat,is.na(longDat$VPD))
+longDat<-subset(longDat,!is.na(longDat$VPD))
+longDatNA$VPD<-extract(VPDann,cbind(longDatNA$decimalLongitude,longDatNA$decimalLatitude),method='bilinear')
+longDatNA<-subset(longDatNA,!is.na(longDatNA$VPD))
+longDat<-rbind(longDat,longDatNA)
+longDat$elongation<-with(longDat,egg_length/egg_width)
+
+
+#loop through each species and find out if egg elongation changes with VPD,
+#we expect some species will have decreased elongation with increasing VPD
+#some nests have multiple eggs so treat nest ID as random effect
+
+modelDat<-list()
+for (sp in 1:length(species)){
+  df2<-subset(longDat, Species == species[sp])
+  observationCount<-nrow(df2)
+  uniqueNests<-length(unique(df2$id))
+  #mixed effect model to control for multiple eggs in a nest
+  mxElongIntra<-lmer(elongation ~ VPD * LAI + (1|id),data=df2,REML=TRUE)#add nest ID
+  qqPlot(residuals(mxElongIntra),main=("mod1"))
+  summary(mxElongIntra)
+  Anova(mxElongIntra, test.statistic="F")
+# # #check on spatial autocorrelation
+#        C_lmEl <- correlog(df2$decimalLongitude, df2$decimalLatitude, residuals(mod1),
+#                           na.rm=T, increment=100, resamp=0,latlon=TRUE)
+#       
+#        plot(0,type="n",col="black",ylab="Moran's I",xlab="lag distance",xlim=c(0,4600),ylim=c(-1,1),main = "Elongation")
+       #abline(h=0,lty="dotted")
+       #lines(C_lmEl$correlation~C_lmEl$mean.of.class,col="red",lwd=2)
+       plot(VPDann,col="grey70",legend=FALSE,main = species[sp])
+       points(df2$decimalLongitude, 
+              df2$decimalLatitude, 
+              col=c("blue","red")[sign(resid(mxElongIntra))/2+1.5],
+              pch=19,
+              cex=abs(resid(mxElongIntra))/max(resid(mxElongIntra))*2, 
+              add=TRUE)
+  text(120,-10,paste(sp))
+  p<-round(Anova(mxElongIntra)$"Pr(>Chisq)",digits = 3)#get p values from lmer
+    #text(130,-40,p)
+  modAnova<-Anova(mxElongIntra, test.statistic="F")
+  f<-modAnova$F
+  df<-modAnova$Df
+  dfRes<-modAnova$"Df.res"
+
+  modelDat[[sp]]<-cbind(species[sp],observationCount,uniqueNests,p,f,df,dfRes)
+}
+
+do.call("rbind",modelDat)
+
+# If I wanted to report results for sp <- 14
+
+#F(1, 4.23) = 0.5495518, p = 0.37
+
+# 5  F(1, 10.7) = 5.7, p < 0.05
+# 10 F(1, 3.3) = 5.2, p < 0.05
+# 13 F(1, 34.5) = 3.4, p < 0.05
+# 
+
+
+

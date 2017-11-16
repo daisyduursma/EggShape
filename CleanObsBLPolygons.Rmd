@@ -1,0 +1,203 @@
+---
+title: "Final Clean of obs using Birdlife Polygons"
+output: html_document
+---
+  
+  Final cleaning of observations using birdlife polygons
+
+```{r, echo=FALSE}
+rm(list = ls())
+
+library(raster)
+library(RColorBrewer)#
+library(lattice)#
+library(maptools)
+library(letsR)
+library(plantecophys)#
+library(data.table)
+```
+```{r}
+
+```
+
+
+
+
+
+
+```{r, echo=FALSE}
+traits<-read.csv('/Users/daisy/Google Drive/PhD/ThermalStress/data/ThermalStressTraits2016-05-09.csv')
+traits$BL.name<-with(traits,paste0("/",BLGenus,"_",BLSpecies,"_",number))
+traits<-subset(traits,USEThermalStressStudy != 'omit')
+
+passer<-traits$Species
+
+obs <- fread("~/Google Drive/PhD/Data/Observaitons/Cleaned/observations/PASSARINE_ALAGBIFABBBSATLASGridCellIDObservations2016-06-17.csv",data.table=FALSE)
+
+gnt<-subset(read.csv('~/Google Drive/PhD/birdTraits/PublishedData/Australian_Bird_Data_Version_1.csv'),
+            is.na(X6_Subspecies_name_2))
+
+gnt <- subset(read.csv('~/Google Drive/PhD/birdTraits/PublishedData/Australian_Bird_Data_Version_1.csv'),
+                 X31_Non.breeding_populations_of_core_taxa_4==0 &
+                   X32_Extinct_4==0 &
+                   X34_Vagrant_4==0 &
+                   X17_Species_2==1 &
+                   is.na(X6_Subspecies_name_2) &
+                   X11_Order_2=="Passeriformes")[,c("Species","X193_National_movement_local_dispersal_13")]
+
+
+############################
+
+#100 km shapefile mask based on climate data using in study
+
+############################
+aus<-raster("/Users/daisy/Google Drive/PhD/Data/Spatial/Climate/BOM/maxann.txt")#mask of Australia
+aus_XY <- as.data.frame(rasterToPoints(aus))#find lat and long of 1km data
+aus<-aggregate(aus,fact=40,na.rm=TRUE)#make raster 1 degree
+aus[]<-1:1505 #Give each grid cell unique value
+aus_XY$GridCellID<-extract(aus,cbind(aus_XY$x,aus_XY$y),method='simple')#extract the 1km resolution cell value
+gridCount<-as.data.frame(table(aus_XY$GridCellID))#find how many grid cells fall in the 1 degree data
+gridCount<-subset(gridCount,Freq>=533)#only keep grid cells that are actually at least 33% land
+gridCount$val<-1 #set the value to 1
+ausMask<-subs(aus, data.frame(gridCount[,c("Var1","val")])) 
+aus<-raster::mask(aus,ausMask)
+```
+
+Read in shapefiles and make plots of breeding occurance
+
+```{r, echo=FALSE}
+shape.dir<-"~/Google Drive/PhD/Data/Spatial/BirdlifeSpeciesDistributions/All"
+
+#make dataframe of species breeding occurance in 100km gridcells
+Occ<-list()
+
+Breedingpoly<-function(shape){
+  #Breeding polygon
+   TF <- (shape$SEASONAL == 2)
+  if (length(shape$SEASONAL) >= 2) {#i<-51 has both breeding and resident 
+    if (length(TF[TF == TRUE]) >= 1) {
+      breeding <-
+        lets.shFilter(shape, presence = "1", origin = "1", seasonal = "2")
+      breeding <- crop(shape,extent(aus))
+    }
+  }
+  #year round resident population
+  TFres <- (shape$SEASONAL == 1)
+    if (length(TFres[TFres == TRUE]) >= 1) {
+      resident <-
+        lets.shFilter(shape, presence = "1", origin = "1", seasonal = "1")
+      resident <- crop(shape,extent(aus))
+    }
+#combine polygons to one shapefile, works even if only breeding or resident polygon
+if(length(TFres[TFres == TRUE]) >= 1 & length(TF[TF == TRUE]) >= 1){
+  Bpoly<-merge(breeding,resident,by = intersect(names(x), names(y)))
+  } else{
+    if(length(TFres[TFres == TRUE]) >= 1){#just resident
+      Bpoly<-resident 
+      } else {
+        if (length(TF[TF == TRUE]) >= 1){#just breeding
+        Bpoly<-breeding
+      }
+  }
+  }
+  return(Bpoly)
+}
+
+for(i in 1:nrow(traits)) {
+  plot(aus,col = 'grey',main = traits$Species[i],legend=FALSE)
+  s <- readShapePoly(paste0(shape.dir,#read in species shape
+                            traits$BL.name[i]),
+                     proj4string = CRS("+proj=longlat +datum=WGS84"))
+  
+  Bpoly<-Breedingpoly(s)
+
+#make rasterized shapefile of birdlife breeding and resident area,bugger for 200km 
+  if(is.null(Bpoly)==T) {
+    text(130,-40,"no birdlife polygon")} else{ 
+      specR <- rasterize(Bpoly,aus,getCover = TRUE)#rasterize shapefile
+      cfun <-
+        function(x) {
+          x[x < 1] <- NA; return(x)
+        }#set background to NA
+      specR <- calc(specR, cfun)
+      specR <- (specR / specR) * aus#clip to australia boundaries
+      if (cellStats(specR,stat = 'sum') ==0) {
+        text(130,-40,"polygon to tiny")} else{ 
+          plot(specR / specR,add = TRUE,col = "blue")#make have value of 1
+          if (cellStats(specR,stat = 'sum') >= 1) {#check of there is polygon and buffer for 2 degrees
+            s2 <-
+              buffer(specR,200000,dissolve = TRUE) * aus / aus#buffer around shapefile to further clean polygons
+            plot(rasterToPolygons(s2,dissolve = TRUE),add = TRUE,lwd = 3)
+            
+          } 
+        } 
+    } 
+########
+#find out which grid cell there are occuranec records for
+  spobs <-
+    subset(obs,Scientific.Name == as.vector(traits$Species[i]))# get species observation
+  movement<-subset(gnt,Species==as.character(traits$Species[i]), X193_National_movement_local_dispersal_13)#find out if local dispersion, if movement is not limited to local then use only breeding observations
+  if(movement$X193_National_movement_local_dispersal_13!=1){ 
+    spobs<-subset(spobs,Breeding==1)
+  }
+  
+  if (nrow(spobs) >= 1 & cellStats(specR,stat = 'sum') >=1) {
+    spobs$insidePoly <- #identify obs inside buffered polygon
+      as.vector(extract(s2,cbind(spobs$lon,spobs$lat)))
+    spobsgood <- subset(spobs,insidePoly == 1)#inside
+    spobsbad <- subset(spobs,is.na(insidePoly))#outside
+    coorsgood <-
+      SpatialPoints(
+        cbind(spobsgood$lon,spobsgood$lat),proj4string = CRS('+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0')
+      )
+    if (nrow(spobsbad) >= 1) {
+      coorsbad <-
+        SpatialPoints(
+          cbind(spobsbad$lon,spobsbad$lat),proj4string = CRS(
+            '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0'
+          )
+        )
+    }
+    specObservationsXY <-
+      na.omit(as.data.frame(extract(aus,coorsgood)))#find the 100km cells occurs in (based on centerpoint of grid cells) for observations
+    specObservationsXY$value = 1
+    colnames(specObservationsXY) <- c("ID","value")
+    specObservationsXY <- unique(specObservationsXY)
+    specObservations <- subs(aus,
+                             data.frame(specObservationsXY[,c("ID","value")]))
+    specObsXY <- as.data.frame(rasterToPoints(specObservations))
+    plot(
+      rasterToPoints(specObservations,spatial = TRUE),add = TRUE,pch =
+        16
+    )
+    if (nrow(spobsbad) >= 1) {
+      plot(
+        coorsbad,add = TRUE,pch = 16,cex = .5,col = 'red'
+      )
+    }
+  }
+  if (nrow(spobs) >= 1 & cellStats(specR,stat = 'sum') ==0) {
+    coorsnoshape <-
+      SpatialPoints(
+        cbind(spobs$lon,spobs$lat),proj4string = CRS('+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0')
+      )
+    plot(
+      coorsnoshape,add = TRUE,pch = 16,cex = .5,col = 'red'
+    )
+  }#observations but no shapefule
+  
+  if (nrow(spobs) == 0) {
+    text(130,-35,"no observations")
+  }#no observations and no shapefile
+  #message(i)
+  #specObsXY$Species<-traits$Species[i]
+  
+  #Occ[[i]]<-specObsXY
+  message(i)
+}
+
+
+
+#Occ<-as.data.frame(do.call("rbind",Occ))
+
+```
